@@ -1,31 +1,41 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { jwtVerify } from 'jose';
 
-export function middleware(request: NextRequest) {
+// Perhatikan penambahan 'async' pada fungsi middleware
+export async function middleware(request: NextRequest) {
   const token = request.cookies.get('token')?.value;
   const isLoginPage = request.nextUrl.pathname === '/login';
 
+  // 1. Jika tidak ada token dan bukan di halaman login, tendang ke login
   if (!token && !isLoginPage) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
+  // 2. Jika ada token, verifikasi keasliannya secara kriptografis
   if (token) {
     try {
-      const payload = JSON.parse(atob(token.split('.')[1]));
+      // FIX: Ambil rahasia dari environment variables.
+      // Pastikan ada JWT_SECRET di file .env.local Anda yang nilainya SAMA PERSIS dengan backend!
+      const secret = new TextEncoder().encode(process.env.JWT_SECRET);
+      
+      // FIX: jwtVerify akan melempar error (masuk ke catch) jika token dipalsukan atau kadaluarsa
+      const { payload } = await jwtVerify(token, secret);
       
       if (payload.role !== 'admin' && !isLoginPage) {
-        const response = NextResponse.redirect(new URL('/login', request.url));
-        response.cookies.delete('token');
-        return response;
+        const res = NextResponse.redirect(new URL('/login', request.url));
+        res.cookies.delete('token');
+        return res;
       }
       
       if (isLoginPage && payload.role === 'admin') {
         return NextResponse.redirect(new URL('/dashboard', request.url));
       }
     } catch (e) {
-      const response = NextResponse.redirect(new URL('/login', request.url));
-      response.cookies.delete('token');
-      return response;
+      // Menangkap: Token kadaluarsa, signature salah, atau token rusak
+      const res = NextResponse.redirect(new URL('/login', request.url));
+      res.cookies.delete('token');
+      return res;
     }
   }
 
