@@ -9,10 +9,11 @@ export default function TalkgroupsPage() {
   const [users, setUsers] = useState<any[]>([]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
   const [selectedTg, setSelectedTg] = useState<string>('');
 
-  const [formData, setFormData] = useState({ name: '', mumble_channel_name: '', mumble_server_address: '' });
+  const [formData, setFormData] = useState({ name: '', mumble_server_address: '', server_port: '64738' });
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
@@ -30,6 +31,15 @@ export default function TalkgroupsPage() {
   });
   const [isEditSubmitting, setIsEditSubmitting] = useState(false);
   const [channelNameChanged, setChannelNameChanged] = useState(false);
+
+  // ── Delete Modal State ──────────────────────────────────
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<any>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // ── Pagination State ────────────────────────────────────
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(10);
 
   const notify = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
@@ -61,14 +71,28 @@ export default function TalkgroupsPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreating) return;
+    setIsCreating(true);
     try {
       await api.post('/talkgroups', formData);
       setIsModalOpen(false);
-      setFormData({ name: '', mumble_channel_name: '', mumble_server_address: '' });
+      setFormData({ name: '', mumble_server_address: '', server_port: '64738' });
       fetchTalkgroups();
-      notify('success', 'Talkgroup berhasil dibuat.');
-    } catch (e) {
-      notify('error', 'Failed to create Talkgroup');
+    } catch (e: any) {
+      const status = e.response?.status;
+      const msg = e.response?.data?.message || '';
+
+      // 409 = sudah terbuat di attempt sebelumnya (ICE timeout race)
+      if (status === 409) {
+        setIsModalOpen(false);
+        setFormData({ name: '', mumble_server_address: '', server_port: '64738' });
+        fetchTalkgroups();
+        return;
+      }
+
+      alert(msg || 'Failed to create Talkgroup');
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -107,6 +131,35 @@ export default function TalkgroupsPage() {
     } catch (e: any) {
       notify('error', e.response?.data?.message || 'Failed to update talkgroup');
       setIsEditSubmitting(false);
+    }
+  };
+
+  // ── Delete Talkgroup ────────────────────────────────────
+  const openDeleteModal = (talkgroup: any) => {
+    setDeleteTarget(talkgroup);
+    setIsDeleteModalOpen(true);
+  };
+
+  const resetDeleteModal = () => {
+    setIsDeleteModalOpen(false);
+    setDeleteTarget(null);
+    setIsDeleting(false);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      await api.delete(`/talkgroups/${deleteTarget.id}`);
+      resetDeleteModal();
+      const remainingCount = talkgroups.length - 1;
+      const newTotalPages = Math.ceil(remainingCount / limit);
+      if (page > newTotalPages && newTotalPages > 0) setPage(newTotalPages);
+      await fetchTalkgroups();
+      notify('success', `Talkgroup "${deleteTarget.name}" berhasil dihapus.`);
+    } catch (e: any) {
+      notify('error', e.response?.data?.message || 'Failed to delete talkgroup');
+      resetDeleteModal();
     }
   };
 
@@ -149,9 +202,12 @@ export default function TalkgroupsPage() {
     user.username.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // ── Pagination Logic ───────────────────────────────────
+  const totalPages = Math.ceil(talkgroups.length / limit);
+  const paginatedTalkgroups = talkgroups.slice((page - 1) * limit, page * limit);
+
   const columns = [
     { header: 'TG Name', accessor: 'name' },
-    { header: 'Mumble Channel', accessor: 'mumbleChannelName' },
     { header: 'Mumble Server', accessor: 'mumbleServerAddress' },
     {
       header: 'Assigned',
@@ -182,6 +238,12 @@ export default function TalkgroupsPage() {
           >
             ASSIGN OPERATOR
           </button>
+          <button
+            onClick={() => openDeleteModal(row)}
+            className="text-xs bg-red-600/20 hover:bg-red-600/40 text-red-400 px-2 py-1 rounded transition-colors border border-red-600/30 hover:border-red-500/50"
+          >
+            HAPUS
+          </button>
         </div>
       )
     }
@@ -209,13 +271,61 @@ export default function TalkgroupsPage() {
         </div>
       )}
 
-      <Table columns={columns} data={talkgroups} keyField="id" />
+      <div>
+        <Table columns={columns} data={paginatedTalkgroups} keyField="id" />
+
+      {/* ══ PAGINATION CONTROLS ═══════════════════════════ */}
+      <div className="grid grid-cols-3 items-center bg-slate-900 border border-t-0 border-slate-700 rounded-b px-4 py-3">
+        {/* Left: Rows per page */}
+        <div className="flex items-center space-x-2 text-sm text-slate-400 justify-self-start">
+          <span>Show entries:</span>
+          <select
+            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none focus:border-blue-500"
+            value={limit}
+            onChange={(e) => {
+              setLimit(Number(e.target.value));
+              setPage(1);
+            }}
+          >
+            <option value={10}>10</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </div>
+
+        {/* Center: Pagination Navigator */}
+        <div className="flex items-center justify-center">
+          <div className="flex items-center space-x-3 bg-slate-800 border border-slate-700 rounded p-1">
+            <button
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="px-3 py-1 text-slate-300 text-sm rounded hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+            >
+              &larr; Prev
+            </button>
+            <div className="px-2 text-sm font-medium text-slate-300 border-x border-slate-700">
+              Page <span className="text-white">{page}</span> of <span className="text-white">{totalPages || 1}</span>
+            </div>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages || totalPages === 0}
+              className="px-3 py-1 text-slate-300 text-sm rounded hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+            >
+              Next &rarr;
+            </button>
+          </div>
+        </div>
+
+        {/* Right: Empty space */}
+        <div className="justify-self-end"></div>
+      </div>
+      </div>
 
       {/* ══ CREATE MODAL ══════════════════════════════════ */}
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="ALLOCATE NEW TALKGROUP">
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
-            <label className="block text-xs text-slate-400 uppercase mb-1">Alias / Name</label>
+            <label className="block text-xs text-slate-400 uppercase mb-1">Talkgroup Name</label>
             <input
               type="text"
               className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500 text-slate-200"
@@ -224,33 +334,41 @@ export default function TalkgroupsPage() {
               required
             />
           </div>
-          <div>
-            <label className="block text-xs text-slate-400 uppercase mb-1">Mumble Channel Path</label>
-            <input
-              type="text"
-              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500 text-slate-200"
-              value={formData.mumble_channel_name}
-              onChange={e => setFormData({ ...formData, mumble_channel_name: e.target.value })}
-              placeholder="Root/Channel"
-              required
-            />
+          {/* BOX 2: Split Server IP & Port */}
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="block text-xs text-slate-400 uppercase mb-1">Server IP / Host</label>
+              <input
+                type="text"
+                className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500 text-slate-200"
+                value={formData.mumble_server_address}
+                onChange={e => setFormData({ ...formData, mumble_server_address: e.target.value })}
+                placeholder="127.0.0.1"
+                required
+              />
+            </div>
+            <div className="w-1/3">
+              <label className="block text-xs text-slate-400 uppercase mb-1 flex items-center gap-1.5">
+                Port
+                <span className="text-[9px] bg-slate-800 border border-slate-700 px-1 rounded text-slate-500">FIXED</span>
+              </label>
+              <input
+                type="text"
+                className="w-full bg-slate-800/60 border border-slate-700/50 rounded px-3 py-2 text-sm text-slate-500 cursor-not-allowed select-none font-mono"
+                value={formData.server_port}
+                readOnly
+                tabIndex={-1}
+              />
+            </div>
           </div>
-          <div>
-            <label className="block text-xs text-slate-400 uppercase mb-1">Server Address</label>
-            <input
-              type="text"
-              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500 text-slate-200"
-              value={formData.mumble_server_address}
-              onChange={e => setFormData({ ...formData, mumble_server_address: e.target.value })}
-              placeholder="mumble.local:64738"
-              required
-            />
-          </div>
+
           <button
             type="submit"
-            className="w-full bg-blue-600 hover:bg-blue-500 py-2.5 rounded text-sm font-medium mt-4 shadow-lg shadow-blue-900/20 text-white"
+            disabled={isCreating}
+            className={`w-full py-2 rounded text-sm font-medium mt-2 transition-colors
+              ${isCreating ? 'bg-slate-600 text-slate-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white'}`}
           >
-            INITIALIZE TALKGROUP
+            {isCreating ? 'INITIALIZING...' : 'INITIALIZE TALKGROUP'}
           </button>
         </form>
       </Modal>
@@ -258,8 +376,6 @@ export default function TalkgroupsPage() {
       {/* ══ EDIT MODAL ════════════════════════════════════ */}
       <Modal isOpen={isEditModalOpen} onClose={resetEditModal} title={`EDIT TALKGROUP — ${editTarget?.name ?? ''}`}>
         <form onSubmit={handleEdit} className="space-y-4">
-
-          {/* Name — bebas diedit */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">Alias / Name</label>
             <input
@@ -270,8 +386,6 @@ export default function TalkgroupsPage() {
               required
             />
           </div>
-
-          {/* Mumble Channel Name — editable dengan warning */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">Mumble Channel Path</label>
             <input
@@ -290,7 +404,6 @@ export default function TalkgroupsPage() {
               }}
               required
             />
-            {/* Warning — muncul hanya saat channel name diubah */}
             {channelNameChanged && (
               <div className="mt-2 px-3 py-2 bg-amber-950/40 border border-amber-700/50 rounded text-xs text-amber-400 flex gap-2">
                 <span className="shrink-0">⚠</span>
@@ -302,8 +415,6 @@ export default function TalkgroupsPage() {
               </div>
             )}
           </div>
-
-          {/* Server Address — read-only / locked */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1 flex items-center gap-1.5">
               Server Address
@@ -322,8 +433,6 @@ export default function TalkgroupsPage() {
               Server address tidak dapat diubah. Gunakan delete → provision baru untuk migrasi server.
             </p>
           </div>
-
-          {/* Buttons */}
           <div className="pt-2 flex gap-2">
             <button
               type="button"
@@ -429,6 +538,68 @@ export default function TalkgroupsPage() {
             {isSubmitting ? 'SYNCING...' : selectedUserIds.size > 0 ? `SYNC ${selectedUserIds.size} OPERATOR(S)` : 'CLEAR ALL OPERATORS'}
           </button>
         </form>
+      </Modal>
+
+      {/* ══ DELETE CONFIRMATION MODAL ═════════════════════ */}
+      <Modal isOpen={isDeleteModalOpen} onClose={resetDeleteModal} title="KONFIRMASI HAPUS TALKGROUP">
+        <div className="space-y-4">
+          {/* Warning banner */}
+          <div className="flex gap-3 px-3 py-3 bg-red-950/40 border border-red-800/50 rounded">
+            <span className="text-red-400 text-lg shrink-0">⚠</span>
+            <div className="text-sm text-red-300 leading-relaxed">
+              Tindakan ini <span className="font-semibold text-red-200">tidak dapat dibatalkan</span>.
+              Channel Murmur akan dihapus dari server dan semua assignment operator akan terputus.
+            </div>
+          </div>
+
+          {/* Target info */}
+          <div className="bg-slate-900 border border-slate-700 rounded px-4 py-3 space-y-2">
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Talkgroup Name</span>
+              <span className="text-slate-100 font-semibold">{deleteTarget?.name}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Mumble Channel</span>
+              <span className="font-mono text-xs text-slate-300">{deleteTarget?.mumbleChannelName}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Assigned Operators</span>
+              <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                (deleteTarget?.users?.length ?? 0) > 0
+                  ? 'bg-amber-900/40 text-amber-400 border border-amber-800/50'
+                  : 'bg-slate-800 text-slate-400 border border-slate-700'
+              }`}>
+                {deleteTarget?.users?.length ?? 0} operator
+              </span>
+            </div>
+          </div>
+
+          {/* Extra warning jika masih ada operator assigned */}
+          {(deleteTarget?.users?.length ?? 0) > 0 && (
+            <div className="px-3 py-2 bg-amber-950/30 border border-amber-800/40 rounded text-xs text-amber-400 flex gap-2">
+              <span className="shrink-0">ℹ</span>
+              <span>Talkgroup ini masih memiliki {deleteTarget.users.length} operator yang akan kehilangan akses channel ini.</span>
+            </div>
+          )}
+
+          {/* Buttons */}
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={resetDeleteModal}
+              disabled={isDeleting}
+              className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-300 py-2.5 rounded text-sm font-medium transition-colors border border-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              BATAL
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="flex-1 bg-red-700 hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2.5 rounded text-sm font-medium transition-colors shadow-lg shadow-red-900/30"
+            >
+              {isDeleting ? 'MENGHAPUS...' : 'YA, HAPUS TALKGROUP'}
+            </button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

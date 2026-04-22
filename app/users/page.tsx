@@ -12,6 +12,14 @@ export default function UsersPage() {
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(10);
 
+  // ── Notification ───────────────────────────────────────
+  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const notify = (type: 'success' | 'error', message: string) => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), 4000);
+  };
+
   // ── Create modal ───────────────────────────────────────
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({
@@ -35,6 +43,12 @@ export default function UsersPage() {
   const [editTgSearch, setEditTgSearch] = useState('');
   const [editGroupSearch, setEditGroupSearch] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+
+  // ── Delete modal ───────────────────────────────────────
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<any>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // ── Fetch ──────────────────────────────────────────────
   const fetchAll = async () => {
@@ -75,32 +89,71 @@ export default function UsersPage() {
   // ── Create user ────────────────────────────────────────
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreating) return;
+    setIsCreating(true);
+
+    let newUserId: string | null = null;
+
     try {
-      const payload = {
+      const res = await api.post('/users', {
         username: formData.username,
         password: formData.password,
-        talkgroupIds: formData.talkgroupIds,
-      };
-      const res = await api.post('/auth/register', payload);
-      const newUserId = res.data.data?.id || res.data.id;
+        role: 'user',
+      });
+      newUserId = res.data.data?.id;
+    } catch (e: any) {
+      const status = e.response?.status;
 
-      if (formData.groupIds.length > 0 && newUserId) {
-        await Promise.all(
-          formData.groupIds.map(async (gid) => {
-            const group = groups.find((g: any) => g.id === gid);
-            const currentMemberIds = (group?.members || []).map((m: any) => m.user?.id).filter(Boolean);
-            await api.put(`/groups/${gid}/members`, {
-              userIds: [...currentMemberIds, newUserId]
-            });
-          })
-        );
+      if (status === 409) {
+        // User sudah terbuat di attempt sebelumnya (race/timeout)
+        // Cari userId-nya supaya assignment tetap bisa jalan
+        try {
+          const usersRes = await api.get('/users');
+          const found = (usersRes.data.data || []).find(
+            (u: any) => u.username === formData.username
+          );
+          if (found) newUserId = found.id;
+        } catch {}
+      } else {
+        notify('error', e.response?.data?.message || 'Failed to create user');
+        setIsCreating(false);
+        return;
       }
-
-      resetCreateModal();
-      fetchAll();
-    } catch (e) {
-      alert('Failed to create user');
     }
+
+    if (!newUserId) {
+      notify('error', 'Gagal mendapatkan ID user baru.');
+      setIsCreating(false);
+      return;
+    }
+
+    // Assign talkgroups
+    if (formData.talkgroupIds.length > 0) {
+      await Promise.all(
+        formData.talkgroupIds.map(tgId =>
+          api.post(`/talkgroups/${tgId}/assign-user`, { userId: newUserId })
+            .catch(() => {}) // ignore 409 already assigned
+        )
+      );
+    }
+
+    // Assign groups
+    if (formData.groupIds.length > 0) {
+      await Promise.all(
+        formData.groupIds.map(async (groupId) => {
+          const group = groups.find((g: any) => g.id === groupId);
+          const currentMemberIds = (group?.members || []).map((m: any) => m.user.id);
+          await api.put(`/groups/${groupId}/members`, {
+            userIds: [...currentMemberIds, newUserId]
+          }).catch(() => {});
+        })
+      );
+    }
+
+    resetCreateModal();
+    await fetchAll();
+    notify('success', 'User berhasil dibuat.');
+    setIsCreating(false);
   };
 
   // ── Open Revise modal ──────────────────────────────────
@@ -127,15 +180,12 @@ export default function UsersPage() {
     setIsSubmitting(true);
 
     try {
-      // Step 1: Update username (dan password jika diisi)
       const userPayload: any = { username: editFormData.username };
       if (editFormData.password.trim()) {
         userPayload.password = editFormData.password;
       }
       await api.put(`/users/${editTarget.id}`, userPayload);
 
-      // Step 2: Sinkronisasi Talkgroups
-      // Hitung talkgroup yang ditambah dan yang dihapus
       const oldTgIds: string[] = (editTarget.talkgroups || []).map((ut: any) => ut.talkgroupId);
       const newTgIds = editFormData.talkgroupIds;
       const allAffectedTgIds = [...new Set([...oldTgIds, ...newTgIds])];
@@ -160,8 +210,6 @@ export default function UsersPage() {
         }
       }
 
-      // Step 3: Sinkronisasi Groups
-      // Hitung group yang ditambah dan yang dihapus
       const oldGroupIds: string[] = (editTarget.groups || []).map((ug: any) => ug.groupId);
       const newGroupIds = editFormData.groupIds;
       const allAffectedGroupIds = [...new Set([...oldGroupIds, ...newGroupIds])];
@@ -176,12 +224,10 @@ export default function UsersPage() {
 
             let updatedIds: string[];
             if (newGroupIds.includes(gid)) {
-              // Tambahkan user ke group ini jika belum ada
               updatedIds = currentMemberIds.includes(editTarget.id)
                 ? currentMemberIds
                 : [...currentMemberIds, editTarget.id];
             } else {
-              // Hapus user dari group ini
               updatedIds = currentMemberIds.filter((id) => id !== editTarget.id);
             }
 
@@ -192,10 +238,43 @@ export default function UsersPage() {
 
       resetEditModal();
       fetchAll();
-    } catch (e) {
-      alert('Failed to update user');
+      notify('success', 'User berhasil diupdate.');
+    } catch (e: any) {
+      notify('error', e.response?.data?.message || 'Failed to update user');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // ── Delete user ────────────────────────────────────────
+  const openDeleteModal = (user: any) => {
+    setDeleteTarget(user);
+    setIsDeleteModalOpen(true);
+  };
+
+  const resetDeleteModal = () => {
+    setIsDeleteModalOpen(false);
+    setDeleteTarget(null);
+    setIsDeleting(false);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      await api.delete(`/users/${deleteTarget.id}`);
+
+      // Hitung page setelah delete SEBELUM fetchAll
+      const remainingCount = users.length - 1;
+      const newTotalPages = Math.max(1, Math.ceil(remainingCount / limit));
+      if (page > newTotalPages) setPage(newTotalPages);
+
+      resetDeleteModal();
+      await fetchAll();
+      notify('success', `User "${deleteTarget.username}" berhasil dihapus.`);
+    } catch (e: any) {
+      notify('error', e.response?.data?.message || 'Failed to delete user');
+      resetDeleteModal();
     }
   };
 
@@ -249,11 +328,11 @@ export default function UsersPage() {
   // ── Filters (Edit) ─────────────────────────────────────
   const filteredEditTgs = editTgSearch.length > 0
     ? talkgroups.filter(tg => tg.name.toLowerCase().includes(editTgSearch.toLowerCase()))
-    : talkgroups; // Edit: tampilkan semua talkgroup (bukan kosong) agar bisa uncheck juga
+    : talkgroups;
 
   const filteredEditGroups = editGroupSearch.length > 0
     ? groups.filter(g => g.name.toLowerCase().includes(editGroupSearch.toLowerCase()))
-    : groups; // Edit: tampilkan semua group
+    : groups;
 
   // ── Pagination Logic ───────────────────────────────────
   const totalPages = Math.ceil(users.length / limit);
@@ -270,6 +349,17 @@ export default function UsersPage() {
           CREATE USER
         </button>
       </div>
+
+      {/* ══ NOTIFICATION ══════════════════════════════════ */}
+      {notification && (
+        <div className={`mb-4 px-4 py-2 rounded text-sm border ${
+          notification.type === 'error'
+            ? 'bg-red-950/50 border-red-900 text-red-400'
+            : 'bg-green-950/50 border-green-900 text-green-400'
+        }`}>
+          {notification.type === 'error' ? '⚠' : '✓'} {notification.message}
+        </div>
+      )}
 
       {/* ══ DATA TABLE ════════════════════════════════════ */}
       <div className="overflow-x-auto bg-slate-900 rounded-t border border-slate-700">
@@ -301,17 +391,12 @@ export default function UsersPage() {
 
                 return (
                   <tr key={user.id} className="hover:bg-slate-800/50 transition-colors">
-                    {/* User ID */}
                     <td className="px-4 py-3 font-mono text-xs text-slate-500 align-top pt-4">
                       {user.id}
                     </td>
-
-                    {/* Username */}
                     <td className="px-4 py-3 font-medium text-slate-200 align-top pt-4">
                       {user.username}
                     </td>
-
-                    {/* Role */}
                     <td className="px-4 py-3 align-top pt-4">
                       <span className={`px-2 py-1 text-[10px] uppercase font-bold rounded tracking-wider ${
                         user.role === 'admin'
@@ -321,8 +406,6 @@ export default function UsersPage() {
                         {user.role}
                       </span>
                     </td>
-
-                    {/* Groups */}
                     <td className="px-4 py-3 align-top">
                       {assignedGroups.length === 0 ? (
                         <span className="text-xs text-slate-500 italic">—</span>
@@ -354,8 +437,6 @@ export default function UsersPage() {
                         </div>
                       )}
                     </td>
-
-                    {/* Talkgroups */}
                     <td className="px-4 py-3 align-top">
                       {assignedTgs.length === 0 ? (
                         <span className="text-xs text-slate-500 italic">—</span>
@@ -388,14 +469,22 @@ export default function UsersPage() {
                       )}
                     </td>
 
-                    {/* Action */}
+                    {/* ── Action Column ── */}
                     <td className="px-4 py-3 text-center align-top pt-3">
-                      <button
-                        onClick={() => handleRevise(user)}
-                        className="bg-amber-600/20 hover:bg-amber-600/40 text-amber-400 text-xs px-3 py-1.5 rounded transition-colors border border-amber-600/30 hover:border-amber-500/50"
-                      >
-                        REVISI
-                      </button>
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          onClick={() => handleRevise(user)}
+                          className="bg-amber-600/20 hover:bg-amber-600/40 text-amber-400 text-xs px-3 py-1.5 rounded transition-colors border border-amber-600/30 hover:border-amber-500/50"
+                        >
+                          REVISI
+                        </button>
+                        <button
+                          onClick={() => openDeleteModal(user)}
+                          className="bg-red-600/20 hover:bg-red-600/40 text-red-400 text-xs px-3 py-1.5 rounded transition-colors border border-red-600/30 hover:border-red-500/50"
+                        >
+                          HAPUS
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -407,7 +496,6 @@ export default function UsersPage() {
 
       {/* ══ PAGINATION CONTROLS ═══════════════════════════ */}
       <div className="grid grid-cols-3 items-center bg-slate-900 border border-t-0 border-slate-700 rounded-b px-4 py-3">
-        {/* Left: Rows per page */}
         <div className="flex items-center space-x-2 text-sm text-slate-400 justify-self-start">
           <span>Show entries:</span>
           <select
@@ -423,8 +511,6 @@ export default function UsersPage() {
             <option value={100}>100</option>
           </select>
         </div>
-
-        {/* Center: Pagination Navigator */}
         <div className="flex items-center justify-center">
           <div className="flex items-center space-x-3 bg-slate-800 border border-slate-700 rounded p-1">
             <button
@@ -446,8 +532,6 @@ export default function UsersPage() {
             </button>
           </div>
         </div>
-
-        {/* Right: Empty space */}
         <div className="justify-self-end"></div>
       </div>
 
@@ -474,8 +558,6 @@ export default function UsersPage() {
               required
             />
           </div>
-
-          {/* Assign to Group */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">
               Assign to Group <span className="normal-case text-slate-500">(opsional)</span>
@@ -509,8 +591,6 @@ export default function UsersPage() {
               <p className="text-xs text-indigo-400 mt-2 font-medium">✓ {formData.groupIds.length} group dipilih</p>
             )}
           </div>
-
-          {/* Assign Talkgroup */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">
               Assign Talkgroup <span className="normal-case text-slate-500">(opsional)</span>
@@ -544,10 +624,14 @@ export default function UsersPage() {
               <p className="text-xs text-blue-400 mt-2 font-medium">✓ {formData.talkgroupIds.length} talkgroup dipilih</p>
             )}
           </div>
-
           <div className="pt-2">
-            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded text-sm font-medium transition-colors shadow-lg shadow-blue-900/20">
-              CREATE USER
+            <button
+              type="submit"
+              disabled={isCreating}
+              className={`w-full py-2.5 rounded text-sm font-medium transition-colors shadow-lg shadow-blue-900/20
+                ${isCreating ? 'bg-slate-600 text-slate-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white'}`}
+            >
+              {isCreating ? 'MEMPROSES...' : 'CREATE USER'}
             </button>
           </div>
         </form>
@@ -556,8 +640,6 @@ export default function UsersPage() {
       {/* ══ EDIT / REVISE USER MODAL ══════════════════════ */}
       <Modal isOpen={isEditModalOpen} onClose={resetEditModal} title={`REVISI USER — ${editTarget?.username ?? ''}`}>
         <form onSubmit={handleUpdate} className="space-y-4">
-
-          {/* Username */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">Username</label>
             <input
@@ -568,8 +650,6 @@ export default function UsersPage() {
               required
             />
           </div>
-
-          {/* Password (opsional) */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">
               Password Baru <span className="normal-case text-slate-500">(kosongkan jika tidak diubah)</span>
@@ -582,8 +662,6 @@ export default function UsersPage() {
               onChange={e => setEditFormData({ ...editFormData, password: e.target.value })}
             />
           </div>
-
-          {/* Edit Group Assignment */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">
               Groups <span className="normal-case text-slate-500">(centang = aktif)</span>
@@ -617,8 +695,6 @@ export default function UsersPage() {
               <p className="text-xs text-indigo-400 mt-2 font-medium">✓ {editFormData.groupIds.length} group dipilih</p>
             )}
           </div>
-
-          {/* Edit Talkgroup Assignment */}
           <div>
             <label className="block text-xs text-slate-400 uppercase mb-1">
               Talkgroups <span className="normal-case text-slate-500">(centang = aktif)</span>
@@ -652,8 +728,6 @@ export default function UsersPage() {
               <p className="text-xs text-blue-400 mt-2 font-medium">✓ {editFormData.talkgroupIds.length} talkgroup dipilih</p>
             )}
           </div>
-
-          {/* Submit */}
           <div className="pt-2 flex gap-2">
             <button
               type="button"
@@ -672,6 +746,58 @@ export default function UsersPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* ══ DELETE CONFIRMATION MODAL ═════════════════════ */}
+      <Modal isOpen={isDeleteModalOpen} onClose={resetDeleteModal} title="KONFIRMASI HAPUS USER">
+        <div className="space-y-4">
+          {/* Warning banner */}
+          <div className="flex gap-3 px-3 py-3 bg-red-950/40 border border-red-800/50 rounded">
+            <span className="text-red-400 text-lg shrink-0">⚠</span>
+            <div className="text-sm text-red-300 leading-relaxed">
+              Tindakan ini <span className="font-semibold text-red-200">tidak dapat dibatalkan</span>.
+              User akan dihapus dari database dan akun Murmur-nya akan di-unregister secara permanen.
+            </div>
+          </div>
+
+          {/* Target info */}
+          <div className="bg-slate-900 border border-slate-700 rounded px-4 py-3 space-y-1">
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Username</span>
+              <span className="text-slate-100 font-semibold">{deleteTarget?.username}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Role</span>
+              <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                deleteTarget?.role === 'admin'
+                  ? 'bg-red-900/50 text-red-400 border border-red-800/50'
+                  : 'bg-slate-800 text-slate-300 border border-slate-700'
+              }`}>{deleteTarget?.role}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">User ID</span>
+              <span className="font-mono text-xs text-slate-500">{deleteTarget?.id}</span>
+            </div>
+          </div>
+
+          {/* Buttons */}
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={resetDeleteModal}
+              disabled={isDeleting}
+              className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-300 py-2.5 rounded text-sm font-medium transition-colors border border-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              BATAL
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="flex-1 bg-red-700 hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2.5 rounded text-sm font-medium transition-colors shadow-lg shadow-red-900/30"
+            >
+              {isDeleting ? 'MENGHAPUS...' : 'YA, HAPUS USER'}
+            </button>
+          </div>
+        </div>
       </Modal>
     </div>
   );
